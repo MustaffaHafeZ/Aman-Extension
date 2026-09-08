@@ -42,7 +42,7 @@ DOMAIN_USER = "mustafa.mhafez"
 HOSTS_SEQ = 11  # 127.0.0.1 ... 127.0.9.1
 
 # ---------------- App Version & GitHub Config ----------------
-CURRENT_VERSION = "v1.0.0"
+CURRENT_VERSION = "v1.0.1"
 GITHUB_REPO = (
     "MustaffaHafeZ/Aman-Extension"  # Replace with actual "owner/repo" on GitHub
 )
