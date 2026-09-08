@@ -39,12 +39,12 @@ BTN_TXT = "#ffffff"
 # ---------------- Domain config ----------------
 DOMAIN = "aman.local"
 DOMAIN_USER = "mustafa.mhafez"
-HOSTS_SEQ = 10  # 127.0.0.1 ... 127.0.9.1
+HOSTS_SEQ = 11  # 127.0.0.1 ... 127.0.9.1
 
 # ---------------- App Version & GitHub Config ----------------
 CURRENT_VERSION = "v1.0.0"
 GITHUB_REPO = (
-    "YourUsername/YourRepoName"  # Replace with actual "owner/repo" on GitHub
+    "MustaffaHafeZ/Aman-Extension"  # Replace with actual "owner/repo" on GitHub
 )
 
 # ---------------- Globals ----------------
