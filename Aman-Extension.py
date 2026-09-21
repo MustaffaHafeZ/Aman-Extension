@@ -67,7 +67,7 @@ DOMAIN_USER = "mustafa.mhafez"
 HOSTS_SEQ = 10  # 127.0.0.1 ... 127.0.9.1
 
 # ---------------- App Version & GitHub Config ----------------
-CURRENT_VERSION = "v1.0.0"
+CURRENT_VERSION = "v1.0.5"
 GITHUB_REPO = (
     "MustaffaHafeZ/Aman-Extension"  # Replace with actual "owner/repo" on GitHub
 )
@@ -1097,28 +1097,6 @@ def sys_cleanup():
     )
 
 
-def sys_sync_time():
-    run_cmd(
-        "systemctl restart systemd-timesyncd && timedatectl set-ntp true && "
-        "echo 'Time synchronized with NTP server.' && timedatectl status | grep -i 'synchronized'"
-    )
-
-
-def diag_domain_health():
-    run_cmd(
-        "echo '--- DNS Query aman.local ---'; resolvectl query aman.local 2>/dev/null || nslookup aman.local; "
-        "echo '\n--- Ping Domain Controller ---'; ping -c 2 dc.aman.local 2>/dev/null || echo 'DC unreachable via ping'; "
-        "echo '\n--- Active Directory Status ---'; realm list; "
-        "echo '\n--- Active Kerberos Tickets ---'; klist 2>/dev/null || echo 'No active root ticket'"
-    )
-
-
-def sys_restart_network():
-    run_cmd(
-        "systemctl restart NetworkManager && echo 'NetworkManager service restarted successfully.'"
-    )
-
-
 def maint_check_domain():
     run_cmd(
         "echo '--- Realm (Domain) Status ---'; realm list; "
@@ -1270,12 +1248,9 @@ maint_frame.columnconfigure(1, weight=1)
 
 maint_actions = [
     ("🌐  Check Domain (realm list)", maint_check_domain),
-    ("🩺  Domain & Network Health Check", diag_domain_health),
     ("🔧  Fix OS Packages (dpkg/apt fix-broken)", maint_fix_os_packages),
-    ("⏱️  Sync NTP Time (Fix Kerberos)", sys_sync_time),
     ("🧹  System Cleanup (Cache & Logs)", sys_cleanup),
     ("🗑  Clear User Chrome Data", sys_clear_browser_data),
-    ("🌐  Restart NetworkManager", sys_restart_network),
 ]
 
 apps_maint_btns = []
