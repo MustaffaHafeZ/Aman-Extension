@@ -6,20 +6,45 @@
 #  Deps:  sudo apt install python3-tk
 # ================================================================
 
-import glob
 import json
 import os
 import queue
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
 import threading
-import tkinter as tk
 import urllib.error
 import urllib.request
 from datetime import datetime
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+
+# ================================================================
+#  PRE-FLIGHT: ensure python3-tk is installed before importing tkinter.
+#  If missing → runs `sudo apt install python3-tk`, then restarts the tool.
+# ================================================================
+try:
+    import tkinter as tk
+    from tkinter import messagebox, scrolledtext, simpledialog, ttk
+except ImportError:
+    print("python3-tk not found — installing automatically (sudo apt install python3-tk)...")
+    rc = subprocess.call(["sudo", "apt", "install", "-y", "python3-tk"])
+    if rc != 0:
+        # refresh package lists and retry once
+        print("apt install failed — running 'sudo apt update' then retrying...")
+        subprocess.call(["sudo", "apt", "update"])
+        rc = subprocess.call(["sudo", "apt", "install", "-y", "python3-tk"])
+    if rc == 0:
+        print("python3-tk installed — restarting the tool...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    else:
+        print(
+            "ERROR: could not install python3-tk automatically.\n"
+            "Please run manually:  sudo apt install python3-tk\n"
+            "then start the tool again."
+        )
+        sys.exit(1)
+
 
 # ---------------- AMAN brand palette (logo: blue + white) ----------------
 NAVY = "#181830"  # deep navy
@@ -39,10 +64,10 @@ BTN_TXT = "#ffffff"
 # ---------------- Domain config ----------------
 DOMAIN = "aman.local"
 DOMAIN_USER = "mustafa.mhafez"
-HOSTS_SEQ = 11  # 127.0.0.1 ... 127.0.9.1
+HOSTS_SEQ = 10  # 127.0.0.1 ... 127.0.9.1
 
 # ---------------- App Version & GitHub Config ----------------
-CURRENT_VERSION = "v1.0.2"
+CURRENT_VERSION = "v1.0.0"
 GITHUB_REPO = (
     "MustaffaHafeZ/Aman-Extension"  # Replace with actual "owner/repo" on GitHub
 )
@@ -53,6 +78,9 @@ status = None
 buttons = []  # action buttons list
 cmd_queue = queue.Queue()
 busy = False
+current_proc = None  # active Popen → used by Stop button & interactive input
+stop_btn = None      # wired in UI section
+input_entry = None   # wired in UI section
 LOG_FILE = "/var/log/aman_setup.log"
 LOG_COMMANDS = False  # True → echo "$ command" in log ; False → hidden
 
@@ -106,6 +134,16 @@ def set_busy(on, cmd=""):
         except Exception:
             pass
     set_status(f"Running: {cmd}..." if on else "Ready")
+    if stop_btn is not None:
+        try:
+            stop_btn.configure(state="normal" if on else "disabled")
+        except Exception:
+            pass
+    if input_entry is not None:
+        try:
+            input_entry.configure(state="normal" if on else "disabled")
+        except Exception:
+            pass
 
 
 def backup(path):
@@ -310,6 +348,7 @@ def run_cmd(cmd, with_password=None, on_done=None):
 
 
 def _worker(cmd, password, on_done):
+    global current_proc
     try:
         p = subprocess.Popen(
             cmd,
@@ -318,8 +357,9 @@ def _worker(cmd, password, on_done):
             bufsize=1,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if password is not None else None,
+            stdin=subprocess.PIPE,  # always open → allows Y/N answers while running
         )
+        current_proc = p
         if password is not None:
             p.stdin.write(password + "\n")
             p.stdin.flush()
@@ -330,6 +370,8 @@ def _worker(cmd, password, on_done):
         cmd_queue.put(("fin", p.returncode, cmd, on_done))
     except Exception:
         cmd_queue.put(("fin", 1, cmd, on_done))
+    finally:
+        current_proc = None
 
 
 def poll_queue():
@@ -353,6 +395,64 @@ def poll_queue():
     except queue.Empty:
         pass
     root.after(80, poll_queue)
+
+
+# ---------- Stop / Break running command ----------
+def stop_cmd():
+    """Terminates the currently running command (Stop button)."""
+    global current_proc
+    p = current_proc
+    if p is None or p.poll() is not None:
+        log("No command is currently running.", "warn")
+        return
+    log("⏹ Stop requested — terminating running command...", "warn")
+    try:
+        if hasattr(os, "killpg"):
+            # POSIX: kill the whole process group (shell + children like apt)
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        else:
+            p.terminate()
+    except Exception:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    # Hard-kill fallback if it ignores SIGTERM
+    root.after(
+        3000,
+        lambda: (
+            p.poll() is None
+            and (
+                log("Force-killing command...", "err"),
+                (
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    if hasattr(os, "killpg")
+                    else p.kill()
+                ),
+            )
+        ),
+    )
+
+
+# ---------- Interactive input (Y/N prompts from running commands) ----------
+def send_input(text, entry=None):
+    """Sends a line to the running command's stdin (e.g. answer Y/N prompts)."""
+    global current_proc
+    p = current_proc
+    if p is None or p.poll() is not None:
+        log("No running command to receive input.", "warn")
+        return
+    if p.stdin is None or p.stdin.closed:
+        log("Command stdin is closed — input cannot be sent.", "err")
+        return
+    try:
+        p.stdin.write(text + "\n")
+        p.stdin.flush()
+        log(f"→ {text}", "cmd")
+        if entry is not None:
+            entry.delete(0, "end")
+    except Exception as e:
+        log(f"Failed to send input: {e}", "err")
 
 
 # ================================================================
@@ -966,207 +1066,8 @@ def dom_resolved():
 
 
 # ================================================================
-#  APPS & MAINTENANCE — Dynamic Apps, Maintenance & Health
+#  APPS & MAINTENANCE — Maintenance & Health
 # ================================================================
-IGNORE_CORE_PKGS = {
-    "gnome-control-center",
-    "gnome-terminal",
-    "nautilus",
-    "gnome-calculator",
-    "gnome-system-monitor",
-    "gnome-text-editor",
-    "gedit",
-    "ubuntu-software",
-    "snap-store",
-    "yelp",
-    "gnome-characters",
-    "gnome-logs",
-    "gnome-font-viewer",
-    "gnome-disk-utility",
-    "seahorse",
-    "im-config",
-    "nm-connection-editor",
-    "baobab",
-    "eog",
-    "evince",
-    "gnome-clocks",
-    "gnome-calendar",
-    "gnome-weather",
-    "gnome-maps",
-    "gnome-screenshot",
-    "totem",
-    "simple-scan",
-    "software-properties-gtk",
-    "update-manager",
-    "debian-reference-common",
-}
-
-
-def scan_non_default_apps():
-    """Scans desktop files and package index to discover user/enterprise applications."""
-    apps = []
-    desktop_files = glob.glob("/usr/share/applications/*.desktop")
-
-    for dfile in desktop_files:
-        try:
-            name = None
-            exec_cmd = None
-            no_display = False
-
-            with open(dfile, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("Name=") and not name:
-                        name = line.split("=", 1)[1]
-                    elif line.startswith("Exec=") and not exec_cmd:
-                        exec_cmd = line.split("=", 1)[1].split()[0]
-                    elif line.startswith("NoDisplay=true"):
-                        no_display = True
-
-            if not name or not exec_cmd or no_display:
-                continue
-
-            binary_path = shutil.which(exec_cmd) or exec_cmd
-            if not binary_path.startswith("/"):
-                binary_path = f"/usr/bin/{exec_cmd}"
-
-            res = subprocess.run(
-                f"dpkg -S {shlex.quote(binary_path)} 2>/dev/null",
-                shell=True,
-                capture_output=True,
-                text=True,
-            )
-            if res.returncode == 0:
-                pkg = res.stdout.split(":")[0].strip()
-                if (
-                    pkg
-                    and pkg not in IGNORE_CORE_PKGS
-                    and not pkg.startswith("lib")
-                ):
-                    if not any(a["pkg"] == pkg for a in apps):
-                        apps.append({"name": name, "pkg": pkg, "icon": "📦"})
-        except Exception:
-            continue
-
-    return sorted(apps, key=lambda x: x["name"].lower())
-
-
-def app_update_single(pkg, name):
-    """Refreshes repo and checks policy/updates for a specific package."""
-    cmd = (
-        "export DEBIAN_FRONTEND=noninteractive; "
-        "apt-get update; "
-        f"echo '--- Update Status for {name} ({pkg}) ---' && "
-        f"apt-cache policy {shlex.quote(pkg)}"
-    )
-    run_cmd(cmd)
-
-
-def app_upgrade_single(pkg, name):
-    """Executes apt upgrade for a single targeted application."""
-    if messagebox.askyesno(
-        "Upgrade App",
-        f"Upgrade '{name}' ({pkg}) to the latest version?",
-        parent=root,
-    ):
-        cmd = (
-            "export DEBIAN_FRONTEND=noninteractive; "
-            "apt-get update; "
-            f"apt-get install --only-upgrade -y {shlex.quote(pkg)} && "
-            f"echo 'Upgrade process for {name} complete.'"
-        )
-        run_cmd(cmd)
-
-
-def populate_fetched_apps_ui(parent_frame):
-    for child in parent_frame.winfo_children():
-        child.destroy()
-
-    set_status("Scanning non-default applications...")
-    apps = scan_non_default_apps()
-    set_status("Ready")
-
-    if not apps:
-        tk.Label(
-            parent_frame,
-            text="No third-party or non-default apps detected.",
-            bg=PANEL,
-            fg=MUTED,
-            font=("Ubuntu", 10, "italic"),
-        ).pack(pady=20)
-        log("Scanned installed packages: No non-default apps found.", "warn")
-        return
-
-    log(f"Fetched {len(apps)} non-default/user-installed application(s).", "ok")
-
-    for app in apps:
-        row = tk.Frame(
-            parent_frame,
-            bg=PANEL,
-            highlightthickness=1,
-            highlightbackground=PANEL_HI,
-        )
-        row.pack(fill="x", padx=4, pady=3)
-
-        # Icon & Name Info
-        info_frame = tk.Frame(row, bg=PANEL)
-        info_frame.pack(side="left", padx=8, pady=6)
-
-        tk.Label(
-            info_frame, text=app["icon"], bg=PANEL, font=("Ubuntu", 12)
-        ).pack(side="left", padx=(0, 6))
-        tk.Label(
-            info_frame,
-            text=app["name"],
-            bg=PANEL,
-            fg=FG,
-            font=("Ubuntu", 10, "bold"),
-        ).pack(side="left")
-        tk.Label(
-            info_frame,
-            text=f"({app['pkg']})",
-            bg=PANEL,
-            fg=MUTED,
-            font=("Ubuntu", 8),
-        ).pack(side="left", padx=6)
-
-        # Action Buttons: Update & Upgrade
-        btn_frame = tk.Frame(row, bg=PANEL)
-        btn_frame.pack(side="right", padx=8)
-
-        b_upd = tk.Button(
-            btn_frame,
-            text="Update",
-            command=lambda p=app["pkg"], n=app["name"]: app_update_single(p, n),
-            bg=PANEL_HI,
-            fg=FG,
-            activebackground=GOLD_DIM,
-            relief="flat",
-            padx=8,
-            pady=2,
-            font=("Ubuntu", 8, "bold"),
-            cursor="hand2",
-        )
-        b_upd.pack(side="left", padx=3)
-        buttons.append(b_upd)
-
-        b_upg = tk.Button(
-            btn_frame,
-            text="Upgrade",
-            command=lambda p=app["pkg"], n=app["name"]: app_upgrade_single(
-                p, n
-            ),
-            bg=GOLD,
-            fg=NAVY_DARK,
-            activebackground="#f0d080",
-            relief="flat",
-            padx=8,
-            pady=2,
-            font=("Ubuntu", 8, "bold"),
-            cursor="hand2",
-        )
-        b_upg.pack(side="left", padx=3)
-        buttons.append(b_upg)
 
 
 def sys_clear_browser_data():
@@ -1215,6 +1116,23 @@ def diag_domain_health():
 def sys_restart_network():
     run_cmd(
         "systemctl restart NetworkManager && echo 'NetworkManager service restarted successfully.'"
+    )
+
+
+def maint_check_domain():
+    run_cmd(
+        "echo '--- Realm (Domain) Status ---'; realm list; "
+        "echo; echo 'Done.'"
+    )
+
+
+def maint_fix_os_packages():
+    run_cmd(
+        "echo '--- Fixing OS packages (dpkg configure + apt fix-broken) ---'; "
+        "export DEBIAN_FRONTEND=noninteractive; "
+        "dpkg --configure -a; "
+        "apt --fix-broken install -y; "
+        "echo 'OS package fix complete.'"
     )
 
 
@@ -1344,63 +1262,6 @@ nb.add(tab_dom, text="  Domain Setup  ")
 tab_apps = ttk.Frame(nb)
 tab_apps.columnconfigure(0, weight=1)
 
-# Top Bar: Fetch Non-Default Apps
-fetch_frame = tk.Frame(tab_apps, bg=NAVY_DARK)
-fetch_frame.pack(fill="x", padx=6, pady=4)
-
-fetch_btn = tk.Button(
-    fetch_frame,
-    text="🔍  Fetch Non-Default Apps",
-    command=lambda: populate_fetched_apps_ui(apps_container),
-    bg=GOLD,
-    fg=NAVY_DARK,
-    activebackground="#f0d080",
-    relief="flat",
-    padx=12,
-    pady=6,
-    font=("Ubuntu", 10, "bold"),
-    cursor="hand2",
-)
-fetch_btn.pack(side="left")
-buttons.append(fetch_btn)
-
-tk.Label(
-    fetch_frame,
-    text="Detect user-installed & third-party applications with update/upgrade controls.",
-    bg=NAVY_DARK,
-    fg=MUTED,
-    font=("Ubuntu", 9),
-).pack(side="left", padx=10)
-
-# Dynamic Apps Scrollable Container
-apps_wrapper = tk.Frame(
-    tab_apps, bg=PANEL, highlightthickness=1, highlightbackground=PANEL_HI
-)
-apps_wrapper.pack(fill="both", expand=True, padx=6, pady=4)
-
-canvas = tk.Canvas(apps_wrapper, bg=PANEL, highlightthickness=0)
-scrollbar = ttk.Scrollbar(apps_wrapper, orient="vertical", command=canvas.yview)
-apps_container = tk.Frame(canvas, bg=PANEL)
-
-apps_container.bind(
-    "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-)
-canvas.create_window((0, 0), window=apps_container, anchor="nw")
-canvas.configure(yscrollcommand=scrollbar.set)
-
-canvas.pack(side="left", fill="both", expand=True)
-scrollbar.pack(side="right", fill="y")
-
-# Default Placeholder
-placeholder = tk.Label(
-    apps_container,
-    text="Click 'Fetch Non-Default Apps' above to scan installed software.",
-    bg=PANEL,
-    fg=MUTED,
-    font=("Ubuntu", 9, "italic"),
-)
-placeholder.pack(padx=20, pady=25)
-
 # Maintenance Grid Frame
 maint_frame = tk.Frame(tab_apps, bg=NAVY_DARK)
 maint_frame.pack(fill="x", padx=2, pady=4)
@@ -1408,10 +1269,12 @@ maint_frame.columnconfigure(0, weight=1)
 maint_frame.columnconfigure(1, weight=1)
 
 maint_actions = [
-    ("🧹  Clear User Chrome Data", sys_clear_browser_data),
-    ("⏱️  Sync NTP Time (Fix Kerberos)", sys_sync_time),
-    ("🗑  System Cleanup (Cache & Logs)", sys_cleanup),
+    ("🌐  Check Domain (realm list)", maint_check_domain),
     ("🩺  Domain & Network Health Check", diag_domain_health),
+    ("🔧  Fix OS Packages (dpkg/apt fix-broken)", maint_fix_os_packages),
+    ("⏱️  Sync NTP Time (Fix Kerberos)", sys_sync_time),
+    ("🧹  System Cleanup (Cache & Logs)", sys_cleanup),
+    ("🗑  Clear User Chrome Data", sys_clear_browser_data),
     ("🌐  Restart NetworkManager", sys_restart_network),
 ]
 
@@ -1435,6 +1298,23 @@ tk.Label(
     fg=MUTED,
     font=("Ubuntu", 9, "bold"),
 ).pack(side="left")
+
+stop_btn = tk.Button(
+    log_label,
+    text="⏹  Stop Command",
+    command=stop_cmd,
+    state="disabled",
+    bg=ERR,
+    fg="white",
+    activebackground="#b91c1c",
+    relief="flat",
+    padx=10,
+    pady=0,
+    font=("Ubuntu", 8, "bold"),
+    cursor="hand2",
+)
+stop_btn.pack(side="right", padx=(0, 8))
+
 tk.Button(
     log_label,
     text="Clear",
@@ -1467,6 +1347,42 @@ output = scrolledtext.ScrolledText(
 )
 output.pack(fill="both", expand=True, padx=14, pady=(2, 6))
 
+# ---------- Interactive command input (Y/N prompts) ----------
+input_bar = tk.Frame(root, bg=NAVY_DARK)
+input_bar.pack(fill="x", side="bottom", padx=14, pady=(0, 6))
+tk.Label(
+    input_bar,
+    text="Input →",
+    bg=NAVY_DARK,
+    fg=MUTED,
+    font=("Ubuntu", 9, "bold"),
+).pack(side="left")
+input_entry = tk.Entry(
+    input_bar,
+    bg=PANEL,
+    fg=FG,
+    insertbackground=FG,
+    relief="flat",
+    font=("monospace", 10),
+    state="disabled",
+)
+input_entry.pack(side="left", fill="x", expand=True, padx=8, ipady=4)
+send_btn = tk.Button(
+    input_bar,
+    text="Send ⏎",
+    command=lambda: send_input(input_entry.get(), input_entry),
+    bg=GOLD,
+    fg=NAVY_DARK,
+    activebackground="#f0d080",
+    relief="flat",
+    padx=12,
+    pady=2,
+    font=("Ubuntu", 9, "bold"),
+    cursor="hand2",
+)
+send_btn.pack(side="left")
+input_entry.bind("<Return>", lambda _: send_input(input_entry.get(), input_entry))
+
 # ---------- Status Bar ----------
 status = tk.Label(
     root,
@@ -1482,7 +1398,7 @@ status.pack(fill="x", side="bottom")
 
 log("Aman Extension Tool Initialized", "ok")
 log(
-    "System Setup: 7 tools   •   Domain Setup: 7 steps   •   Apps & Maintenance: Dynamic App Manager + Maintenance",
+    "System Setup: 7 tools   •   Domain Setup: 7 steps   •   Apps & Maintenance: Maintenance & Health",
     "info",
 )
 
